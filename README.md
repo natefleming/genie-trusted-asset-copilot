@@ -67,22 +67,19 @@ This installs all required components.
 
 To run this tool directly in Databricks:
 
-1. **Build the package locally:**
-   ```bash
-   make build requirements
-   ```
+1. **Create a Git folder in your Databricks workspace:**
+   - In your Databricks workspace, go to **Workspace** in the left sidebar
+   - Navigate to your user folder or a shared location
+   - Click **Create** → **Git folder**
+   - Enter the repository URL and click **Create Git folder**
 
-2. **Upload to Databricks Workspace:**
-   - Upload the entire project folder to your workspace, or just these files:
-     - `dist/genie_trusted_asset_copilot-*.whl`
-     - `requirements.txt`
-     - `notebooks/run_trusted_asset_copilot.py`
+2. **Open and run the notebook:**
+   - Navigate to `notebooks/run_trusted_asset_copilot` in the cloned folder
+   - Attach the notebook to a cluster
+   - Fill in the widget parameters at the top of the notebook
+   - Click **Run All**
 
-3. **Import and run the notebook:**
-   - Import `notebooks/run_trusted_asset_copilot.py` as a Databricks notebook
-   - Update the `UPLOAD_PATH` variable to match your upload location
-   - Fill in the widget parameters at the top
-   - Run all cells
+That's it! The notebook will automatically install dependencies and run the tool.
 
 ---
 

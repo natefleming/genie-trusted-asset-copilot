@@ -14,27 +14,39 @@
 # MAGIC
 # MAGIC ## How to Use
 # MAGIC
-# MAGIC 1. Fill in the parameters in the widgets at the top of the notebook
-# MAGIC 2. Run all cells
-# MAGIC 3. Review the results at the bottom
-
-# COMMAND ----------
-
-# MAGIC %pip install --upgrade -r ../requirements.txt
-# MAGIC %restart_python
-
-# COMMAND ----------
-
-import sys
-
-sys.path.append("../")
+# MAGIC 1. Clone this repository as a Git folder in your Databricks workspace
+# MAGIC 2. Fill in the parameters in the widgets at the top of the notebook
+# MAGIC 3. Run all cells
+# MAGIC 4. Review the results at the bottom
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 1: Configure Parameters
+# MAGIC ## Step 1: Install Dependencies
 # MAGIC
-# MAGIC Use the widgets above to set your parameters, or modify the defaults below.
+# MAGIC This cell installs required packages. Run this cell first, then continue with the rest.
+
+# COMMAND ----------
+
+# MAGIC %pip install --quiet -r ../requirements.txt
+
+# COMMAND ----------
+
+# Restart Python to pick up new packages
+dbutils.library.restartPython()
+
+# COMMAND ----------
+
+# Add the project root to Python path so we can import the package
+import sys
+sys.path.insert(0, "..")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Step 2: Configure Parameters
+# MAGIC
+# MAGIC Use the widgets above to set your parameters.
 
 # COMMAND ----------
 
@@ -57,6 +69,8 @@ dbutils.widgets.dropdown("register_functions", "Yes", ["Yes", "No"], "11. Regist
 # MAGIC ## Step 3: Run the Copilot
 # MAGIC
 # MAGIC This cell reads the parameters and runs the trusted asset creation workflow.
+# MAGIC
+# MAGIC **Note:** Make sure you've filled in the widget parameters above before running.
 
 # COMMAND ----------
 
