@@ -1,0 +1,33 @@
+[project]
+name = "genie-trusted-asset-copilot"
+version = "0.1.0"
+description = "Automatically create Genie trusted assets and Unity Catalog functions from complex SQL queries in conversations."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "databricks-langchain>=0.13.0",
+    "databricks-sdk>=0.81.0",
+    "langchain-core>=0.3.0",
+    "loguru>=0.7.3",
+    "pydantic>=2.0",
+    "sqlparse>=0.5.5",
+    "unitycatalog-ai>=0.1.0",
+]
+
+[project.scripts]
+genie-trusted-asset-copilot = "genie_trusted_asset_copilot.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
