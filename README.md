@@ -53,6 +53,8 @@ If you're unsure about your permissions, contact your Databricks workspace admin
 
 ## Installation
 
+### Option 1: Run Locally (Command Line)
+
 Open a terminal and navigate to this project folder, then run:
 
 ```bash
@@ -60,6 +62,27 @@ uv sync
 ```
 
 This installs all required components.
+
+### Option 2: Run in Databricks (Notebook)
+
+To run this tool directly in Databricks:
+
+1. **Build the package locally:**
+   ```bash
+   make build requirements
+   ```
+
+2. **Upload to Databricks Workspace:**
+   - Upload the entire project folder to your workspace, or just these files:
+     - `dist/genie_trusted_asset_copilot-*.whl`
+     - `requirements.txt`
+     - `notebooks/run_trusted_asset_copilot.py`
+
+3. **Import and run the notebook:**
+   - Import `notebooks/run_trusted_asset_copilot.py` as a Databricks notebook
+   - Update the `UPLOAD_PATH` variable to match your upload location
+   - Fill in the widget parameters at the top
+   - Run all cells
 
 ---
 
@@ -274,6 +297,36 @@ If you encounter issues:
 2. Try `--dry-run` first to preview changes without risk
 
 3. Contact your Databricks administrator for permission issues
+
+---
+
+## Development
+
+### Makefile Commands
+
+| Command | Description |
+|---------|-------------|
+| `make install` | Install dependencies |
+| `make requirements` | Generate `requirements.txt` for Databricks deployment |
+| `make build` | Build a wheel file for distribution |
+| `make check` | Run linter with auto-fix |
+| `make format` | Format source code |
+| `make analyze` | Run the tool in dry-run mode |
+| `make create-assets` | Run the tool and create assets |
+| `make help` | Show all available commands |
+
+### Quick Commands
+
+```bash
+# Preview changes for a Genie space
+make analyze GENIE_SPACE_ID=abc123 CATALOG=main SCHEMA=genie_functions
+
+# Create assets
+make create-assets GENIE_SPACE_ID=abc123 CATALOG=main SCHEMA=genie_functions WAREHOUSE_ID=xyz789
+
+# Build for Databricks deployment
+make build requirements
+```
 
 ---
 

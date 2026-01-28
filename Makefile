@@ -22,7 +22,7 @@ MAX_CONVERSATIONS ?=
 THRESHOLD ?= complex
 MODEL ?= databricks-claude-sonnet-4
 
-.PHONY: all install depends check format clean distclean analyze create-assets analyze-quick help
+.PHONY: all install depends requirements build check format clean distclean analyze create-assets analyze-quick help
 
 all: install
 
@@ -31,6 +31,16 @@ install: depends
 
 depends:
 	@$(SYNC)
+
+# Generate requirements.txt from pyproject.toml (without editable install)
+requirements:
+	$(UV) export --no-hashes --no-dev --no-emit-project -o requirements.txt
+	@echo "Generated requirements.txt"
+
+# Build wheel for distribution (e.g., to Databricks)
+build:
+	$(UV) build --wheel
+	@echo "Built wheel in dist/"
 
 check:
 	$(RUFF_CHECK) $(SRC_DIR)
@@ -119,6 +129,8 @@ help:
 	$(info       all          - install dependencies (default))
 	$(info       install      - install dependencies)
 	$(info       depends      - sync dependencies)
+	$(info       requirements - generate requirements.txt from pyproject.toml)
+	$(info       build        - build wheel for distribution (e.g., to Databricks))
 	$(info )
 	$(info   Code Quality:)
 	$(info       check        - run ruff linter with auto-fix)

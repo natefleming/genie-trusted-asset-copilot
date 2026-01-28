@@ -1,28 +1,39 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Genie Trusted Asset Copilot
-# MAGIC 
+# MAGIC
 # MAGIC This notebook automatically improves your Genie space by learning from past conversations.
-# MAGIC 
+# MAGIC
 # MAGIC **What it does:**
 # MAGIC - Reads through conversations in your Genie space
 # MAGIC - Identifies complex, valuable SQL queries
 # MAGIC - Creates "trusted assets" so future similar questions get verified answers
 # MAGIC - Optionally creates reusable functions in Unity Catalog
-# MAGIC 
+# MAGIC
 # MAGIC ---
-# MAGIC 
+# MAGIC
 # MAGIC ## How to Use
-# MAGIC 
+# MAGIC
 # MAGIC 1. Fill in the parameters in the widgets at the top of the notebook
 # MAGIC 2. Run all cells
 # MAGIC 3. Review the results at the bottom
 
 # COMMAND ----------
 
+# MAGIC %pip install --upgrade -r ../requirements.txt
+# MAGIC %restart_python
+
+# COMMAND ----------
+
+import sys
+
+sys.path.append("../")
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 1: Configure Parameters
-# MAGIC 
+# MAGIC
 # MAGIC Use the widgets above to set your parameters, or modify the defaults below.
 
 # COMMAND ----------
@@ -43,45 +54,9 @@ dbutils.widgets.dropdown("register_functions", "Yes", ["Yes", "No"], "11. Regist
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Step 2: Install Dependencies
-# MAGIC 
-# MAGIC This cell installs the required packages. It only needs to run once per cluster session.
-
-# COMMAND ----------
-
-# Install the genie-trusted-asset-copilot package
-# Note: Update the path if you've installed the package elsewhere
-%pip install /Workspace/Repos/genie-trusted-asset-copilot --quiet
-
-# If running from source, you can also install dependencies directly:
-# %pip install databricks-sdk langchain-databricks pydantic loguru sqlparse unitycatalog-ai[databricks] --quiet
-
-# COMMAND ----------
-
-# Restart Python to pick up new packages
-dbutils.library.restartPython()
-
-# COMMAND ----------
-
-# MAGIC %md
 # MAGIC ## Step 3: Run the Copilot
-# MAGIC 
+# MAGIC
 # MAGIC This cell reads the parameters and runs the trusted asset creation workflow.
-
-# COMMAND ----------
-
-# Re-create widgets after Python restart
-dbutils.widgets.text("space_id", "", "1. Genie Space ID")
-dbutils.widgets.text("catalog", "", "2. Unity Catalog Name")
-dbutils.widgets.text("schema", "", "3. Schema Name")
-dbutils.widgets.text("warehouse_id", "", "4. SQL Warehouse ID (optional)")
-dbutils.widgets.text("max_conversations", "", "5. Max Conversations (optional)")
-dbutils.widgets.dropdown("complexity_threshold", "complex", ["simple", "moderate", "complex"], "6. Complexity Threshold")
-dbutils.widgets.dropdown("dry_run", "Yes", ["Yes", "No"], "7. Dry Run (preview only)?")
-dbutils.widgets.dropdown("force_replace", "No", ["Yes", "No"], "8. Force Replace Existing?")
-dbutils.widgets.dropdown("create_sql_instructions", "Yes", ["Yes", "No"], "9. Create SQL Instructions?")
-dbutils.widgets.dropdown("create_uc_functions", "Yes", ["Yes", "No"], "10. Create UC Functions?")
-dbutils.widgets.dropdown("register_functions", "Yes", ["Yes", "No"], "11. Register Functions with Genie?")
 
 # COMMAND ----------
 
@@ -185,27 +160,34 @@ if dry_run:
 
 # MAGIC %md
 # MAGIC ## Next Steps
-# MAGIC 
+# MAGIC
 # MAGIC If this was a dry run and you're happy with the results:
 # MAGIC 1. Change **"7. Dry Run (preview only)?"** to **"No"**
 # MAGIC 2. Re-run the notebook
-# MAGIC 
+# MAGIC
 # MAGIC ### Verify Your Trusted Assets
-# MAGIC 
+# MAGIC
 # MAGIC After running (not in dry-run mode):
 # MAGIC 1. Open your Genie space
 # MAGIC 2. Click **Configure** → **Context** → **SQL Queries**
 # MAGIC 3. You should see the newly added SQL examples
-# MAGIC 
+# MAGIC
 # MAGIC ### Verify Your Functions
-# MAGIC 
+# MAGIC
 # MAGIC Check Unity Catalog for your new functions:
 
 # COMMAND ----------
 
 # Show created functions (if any were created)
 if not dry_run and report.uc_functions_created > 0:
-    display(spark.sql(f"SHOW FUNCTIONS IN {catalog}.{schema} LIKE 'genie_*'"))
+    query = f"""
+        SELECT routine_name, routine_type, created, last_altered
+        FROM {catalog}.information_schema.routines
+        WHERE routine_schema = '{schema}'
+        AND routine_name LIKE 'genie_%'
+        ORDER BY created DESC
+    """
+    display(spark.sql(query))
 else:
     print("No functions to display (either dry run or no functions created)")
 
@@ -213,11 +195,11 @@ else:
 
 # MAGIC %md
 # MAGIC ---
-# MAGIC 
+# MAGIC
 # MAGIC ## Troubleshooting
-# MAGIC 
+# MAGIC
 # MAGIC ### Common Issues
-# MAGIC 
+# MAGIC
 # MAGIC | Issue | Solution |
 # MAGIC |-------|----------|
 # MAGIC | "Permission denied" | Make sure you have CAN MANAGE on the Genie space and CREATE on the schema |
