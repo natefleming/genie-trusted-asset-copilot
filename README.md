@@ -132,7 +132,7 @@ The tool will:
 
 ### Limit How Many Conversations to Process
 
-If you have many conversations and want to start small:
+Process only the most recent N conversations. Useful for testing or analyzing recent user patterns:
 
 ```bash
 genie-trusted-asset-copilot \
@@ -142,6 +142,8 @@ genie-trusted-asset-copilot \
   --warehouse-id YOUR_WAREHOUSE_ID \
   --max-conversations 20
 ```
+
+This fetches the 20 most recent conversations (sorted by creation time, newest first).
 
 ### Include More Queries
 
@@ -169,9 +171,9 @@ genie-trusted-asset-copilot \
   --force
 ```
 
-### Optimize SQL Queries
+### Control Concurrent Processing
 
-Before creating trusted assets, you can automatically optimize SQL queries to improve performance:
+By default, the tool processes queries and functions using 4 concurrent worker threads for better performance. You can adjust this based on your needs:
 
 ```bash
 genie-trusted-asset-copilot \
@@ -179,16 +181,13 @@ genie-trusted-asset-copilot \
   --catalog YOUR_CATALOG \
   --schema YOUR_SCHEMA \
   --warehouse-id YOUR_WAREHOUSE_ID \
-  --optimize-sql
+  --num-workers 8
 ```
 
-The optimizer will:
-- Simplify complex expressions
-- Remove redundant subqueries and CTEs
-- Eliminate unnecessary joins
-- Normalize query structure
-
-This is particularly useful for queries extracted from conversations, which may contain inefficiencies.
+**Guidelines:**
+- **Single-threaded (`--num-workers 1`)**: Sequential processing, useful for debugging or avoiding concurrency issues
+- **Default (`--num-workers 4`)**: Balanced performance for most use cases
+- **High concurrency (`--num-workers 8` or more)**: Faster processing, but may hit API rate limits
 
 ### Choose What to Create
 
@@ -292,11 +291,11 @@ Make sure:
 | `--catalog` | Where to store functions (required) | — |
 | `--schema` | Schema within the catalog (required) | — |
 | `--warehouse-id` | SQL warehouse for creating functions | — |
-| `--max-conversations` | Limit conversations to process | All |
+| `--max-conversations` | Process the N most recent conversations | All |
 | `--threshold` | Complexity level: `simple`, `moderate`, or `complex` | `complex` |
 | `--dry-run` | Preview without making changes | Off |
 | `--force` | Replace existing assets | Off |
-| `--optimize-sql` / `--no-optimize-sql` | Optimize SQL before creating assets | Off |
+| `--num-workers` | Number of concurrent worker threads | `4` |
 | `--sql-instructions` / `--no-sql-instructions` | Create SQL examples | On |
 | `--uc-functions` / `--no-uc-functions` | Create functions | On |
 | `--register-functions` / `--no-register-functions` | Register functions with Genie | On |

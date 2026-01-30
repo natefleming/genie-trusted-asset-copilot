@@ -54,6 +54,7 @@ class ParameterExtraction(BaseModel):
         description="SQL with literal values replaced by parameter placeholders"
     )
     reasoning: str = Field(
+        default="",
         description="Explanation of which values were parameterized and why"
     )
 

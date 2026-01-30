@@ -5,6 +5,8 @@ This module analyzes SQL queries to determine their complexity
 and extracts parameterizable values using an LLM for structured analysis.
 """
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from databricks_langchain import ChatDatabricks
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
@@ -17,7 +19,6 @@ from genie_trusted_asset_copilot.models import (
     SQLParameter,
     TrustedAssetCandidate,
 )
-from genie_trusted_asset_copilot.sql_optimizer import SQLOptimizer
 
 COMPLEXITY_SYSTEM_PROMPT = """You are an expert SQL analyst. Your task is to analyze SQL queries and determine their complexity.
 
@@ -86,7 +87,6 @@ class ComplexityEvaluator:
         model: str = "databricks-claude-sonnet-4",
         temperature: float = 0.0,
         max_tokens: int = 1000,
-        optimize_sql: bool = False,
     ) -> None:
         """
         Initialize the complexity evaluator.
@@ -95,17 +95,14 @@ class ComplexityEvaluator:
             model: The Databricks model to use for analysis.
             temperature: LLM temperature (0 for deterministic output).
             max_tokens: Maximum tokens in the response.
-            optimize_sql: Whether to optimize SQL before analysis (default: False).
         """
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.optimize_sql = optimize_sql
 
         self._llm: ChatDatabricks | None = None
         self._structured_llm: ChatDatabricks | None = None
         self._param_extraction_llm: ChatDatabricks | None = None
-        self._sql_optimizer: SQLOptimizer | None = None
 
     @property
     def llm(self) -> ChatDatabricks:
@@ -133,13 +130,6 @@ class ComplexityEvaluator:
                 ParameterExtraction
             )
         return self._param_extraction_llm
-
-    @property
-    def sql_optimizer(self) -> SQLOptimizer:
-        """Lazy initialization of SQL optimizer."""
-        if self._sql_optimizer is None:
-            self._sql_optimizer = SQLOptimizer(dialect="databricks")
-        return self._sql_optimizer
 
     def extract_parameters(
         self,
@@ -325,10 +315,60 @@ class ComplexityEvaluator:
         else:
             logger.debug(log_msg)
 
+    def _evaluate_single_query(
+        self,
+        query: ExtractedQuery,
+        index: int,
+        total: int,
+        threshold_value: int,
+        complexity_order: dict[SQLComplexity, int],
+    ) -> tuple[int, TrustedAssetCandidate | None]:
+        """
+        Process a single query (thread-safe worker function).
+
+        Args:
+            query: The query to evaluate.
+            index: The index of this query in the list.
+            total: Total number of queries being evaluated.
+            threshold_value: Numeric complexity threshold value.
+            complexity_order: Mapping of complexity levels to numeric values.
+
+        Returns:
+            Tuple of (index, candidate_or_none) to maintain order.
+        """
+        logger.info(f"Analyzing query {index + 1}/{total}: {query.question[:60]}...")
+
+        analysis = self.analyze_query(query.sql)
+
+        # Log the SQL, complexity, and reasoning for every query
+        self._log_analysis_result(query, analysis)
+
+        if complexity_order[analysis.complexity] >= threshold_value:
+            # Extract parameters for complex queries
+            logger.info("Extracting parameters for complex query...")
+            parameters, parameterized_sql = self.extract_parameters(
+                query.sql, query.question
+            )
+
+            candidate = TrustedAssetCandidate(
+                question=query.question,
+                sql=query.sql,
+                complexity=analysis,
+                execution_time_ms=query.execution_time_ms,
+                message_id=query.message_id,
+                conversation_id=query.conversation_id,
+                parameters=parameters,
+                parameterized_sql=parameterized_sql,
+            )
+            return (index, candidate)
+
+        return (index, None)
+
     def evaluate_queries(
         self,
         queries: list[ExtractedQuery],
         complexity_threshold: SQLComplexity = SQLComplexity.COMPLEX,
+        num_workers: int = 4,
     ) -> list[TrustedAssetCandidate]:
         """
         Evaluate multiple queries and return candidates meeting the complexity threshold.
@@ -336,11 +376,11 @@ class ComplexityEvaluator:
         Args:
             queries: List of extracted queries to evaluate.
             complexity_threshold: Minimum complexity to be considered a candidate.
+            num_workers: Number of concurrent worker threads (default: 4).
 
         Returns:
             List of TrustedAssetCandidate objects for complex queries.
         """
-        candidates: list[TrustedAssetCandidate] = []
         complexity_order = {
             SQLComplexity.SIMPLE: 0,
             SQLComplexity.MODERATE: 1,
@@ -348,49 +388,42 @@ class ComplexityEvaluator:
         }
         threshold_value = complexity_order[complexity_threshold]
 
-        logger.info(f"Evaluating {len(queries)} queries for complexity")
+        logger.info(
+            f"Evaluating {len(queries)} queries for complexity using {num_workers} workers"
+        )
 
-        for i, query in enumerate(queries):
-            logger.info(f"Analyzing query {i + 1}/{len(queries)}: {query.question[:60]}...")
+        # Collect results with their original indices to maintain order
+        results: list[tuple[int, TrustedAssetCandidate | None]] = []
 
-            # Optimize SQL before analysis if enabled
-            sql_to_analyze = query.sql
-            if self.optimize_sql:
-                optimized_sql, was_optimized, optimizations = self.sql_optimizer.optimize(
-                    query.sql
-                )
-                if was_optimized:
-                    logger.info(f"SQL optimized: {', '.join(optimizations)}")
-                    logger.debug(
-                        f"Original length: {len(query.sql)}, "
-                        f"Optimized length: {len(optimized_sql)}"
-                    )
-                    sql_to_analyze = optimized_sql
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit all queries for processing
+            futures = {
+                executor.submit(
+                    self._evaluate_single_query,
+                    query,
+                    i,
+                    len(queries),
+                    threshold_value,
+                    complexity_order,
+                ): i
+                for i, query in enumerate(queries)
+            }
+            
+            logger.info(f"Thread pool started: {len(futures)} tasks submitted with {num_workers} max worker threads")
 
-            analysis = self.analyze_query(sql_to_analyze)
+            # Collect results as they complete
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    index = futures[future]
+                    logger.error(f"Failed to evaluate query {index + 1}: {e}")
+                    results.append((index, None))
 
-            # Log the SQL, complexity, and reasoning for every query
-            self._log_analysis_result(query, analysis)
-
-            if complexity_order[analysis.complexity] >= threshold_value:
-                # Extract parameters for complex queries (from optimized SQL)
-                logger.info("Extracting parameters for complex query...")
-                parameters, parameterized_sql = self.extract_parameters(
-                    sql_to_analyze, query.question
-                )
-
-                candidates.append(
-                    TrustedAssetCandidate(
-                        question=query.question,
-                        sql=sql_to_analyze,  # Store optimized SQL
-                        complexity=analysis,
-                        execution_time_ms=query.execution_time_ms,
-                        message_id=query.message_id,
-                        conversation_id=query.conversation_id,
-                        parameters=parameters,
-                        parameterized_sql=parameterized_sql,
-                    )
-                )
+        # Sort by index to maintain original order, then extract candidates
+        results.sort(key=lambda x: x[0])
+        candidates = [candidate for _, candidate in results if candidate is not None]
 
         logger.info(
             f"Found {len(candidates)} complex queries out of {len(queries)} total"

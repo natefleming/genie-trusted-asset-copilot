@@ -139,7 +139,7 @@ dbutils.widgets.text("space_id", "", "1. Genie Space ID")
 dbutils.widgets.text("catalog", "", "2. Unity Catalog Name")
 dbutils.widgets.text("schema", "", "3. Schema Name")
 dbutils.widgets.text("warehouse_id", "", "4. SQL Warehouse ID (optional)")
-dbutils.widgets.text("max_conversations", "", "5. Max Conversations (optional)")
+dbutils.widgets.text("max_conversations", "", "5. Max Conversations (optional, most recent N)")
 dbutils.widgets.dropdown("complexity_threshold", "complex", ["simple", "moderate", "complex"], "6. Complexity Threshold")
 dbutils.widgets.dropdown("dry_run", "Yes", ["Yes", "No"], "7. Dry Run (preview only)?")
 dbutils.widgets.dropdown("force_replace", "No", ["Yes", "No"], "8. Force Replace Existing?")
@@ -148,7 +148,7 @@ dbutils.widgets.dropdown("create_uc_functions", "Yes", ["Yes", "No"], "10. Creat
 dbutils.widgets.dropdown("register_functions", "Yes", ["Yes", "No"], "11. Register Functions with Genie?")
 dbutils.widgets.text("from_timestamp", "", "12. From Timestamp (e.g., 7d, 2026-01-15, empty = no filter)")
 dbutils.widgets.text("to_timestamp", "", "13. To Timestamp (e.g., 2026-01-31, empty = no filter)")
-dbutils.widgets.dropdown("optimize_sql", "No", ["Yes", "No"], "14. Optimize SQL with sqlglot?")
+dbutils.widgets.text("num_workers", "4", "14. Number of Concurrent Workers")
 
 # COMMAND ----------
 
@@ -175,10 +175,17 @@ create_uc_functions = dbutils.widgets.get("create_uc_functions") == "Yes"
 register_functions = dbutils.widgets.get("register_functions") == "Yes"
 from_timestamp_str = dbutils.widgets.get("from_timestamp").strip()
 to_timestamp_str = dbutils.widgets.get("to_timestamp").strip()
-optimize_sql = dbutils.widgets.get("optimize_sql") == "Yes"
+num_workers_str = dbutils.widgets.get("num_workers").strip()
 
 # Convert max_conversations to int if provided
 max_conversations = int(max_conversations_str) if max_conversations_str else None
+
+# Convert num_workers to int (default to 4 if invalid)
+try:
+    num_workers = int(num_workers_str) if num_workers_str else 4
+except ValueError:
+    num_workers = 4
+    print(f"Warning: Invalid num_workers value '{num_workers_str}', using default: 4")
 
 # Parse timestamp filters if provided
 from_ts = None
@@ -216,7 +223,7 @@ print(f"Create UC Functions:     {create_uc_functions}")
 print(f"Register Functions:      {register_functions}")
 print(f"From Timestamp:          {from_timestamp_str or 'None (no filter)'}")
 print(f"To Timestamp:            {to_timestamp_str or 'None (no filter)'}")
-print(f"Optimize SQL:            {optimize_sql}")
+print(f"Concurrent Workers:      {num_workers}")
 print("=" * 60)
 
 # COMMAND ----------
@@ -245,7 +252,7 @@ report = run(
     register_uc_functions=register_functions,
     from_timestamp=from_ts,
     to_timestamp=to_ts,
-    optimize_sql=optimize_sql,
+    num_workers=num_workers,
 )
 
 # COMMAND ----------

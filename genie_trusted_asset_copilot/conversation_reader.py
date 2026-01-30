@@ -142,7 +142,7 @@ class ConversationReader:
         List all conversations in the Genie space.
 
         Args:
-            max_conversations: Maximum number of conversations to fetch (None for all).
+            max_conversations: Maximum number of conversations to fetch in descending order by creation time (None for all).
 
         Returns:
             List of GenieConversation objects.

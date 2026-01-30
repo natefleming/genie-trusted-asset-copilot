@@ -38,7 +38,7 @@ def run(
     register_uc_functions: bool = True,
     from_timestamp: int | None = None,
     to_timestamp: int | None = None,
-    optimize_sql: bool = False,
+    num_workers: int = 4,
 ) -> ProcessingReport:
     """
     Run the trusted asset creation workflow.
@@ -59,7 +59,7 @@ def run(
         register_uc_functions: Register UC functions with Genie room.
         from_timestamp: Optional start timestamp in milliseconds (inclusive).
         to_timestamp: Optional end timestamp in milliseconds (inclusive).
-        optimize_sql: Whether to optimize SQL queries before creating assets (default: False).
+        num_workers: Number of concurrent worker threads for processing (default: 4).
 
     Returns:
         ProcessingReport with summary statistics.
@@ -113,10 +113,12 @@ def run(
 
     # Step 2: Analyze complexity
     logger.info("Step 2: Analyzing SQL complexity...")
-    evaluator = ComplexityEvaluator(model=model, optimize_sql=optimize_sql)
+    evaluator = ComplexityEvaluator(model=model)
 
     threshold = SQLComplexity(complexity_threshold.lower())
-    candidates = evaluator.evaluate_queries(queries, complexity_threshold=threshold)
+    candidates = evaluator.evaluate_queries(
+        queries, complexity_threshold=threshold, num_workers=num_workers
+    )
 
     if not candidates:
         logger.warning(f"No queries met the {complexity_threshold} complexity threshold")
@@ -148,6 +150,7 @@ def run(
         create_sql_instructions=create_sql_instructions,
         create_uc_functions=create_uc_functions,
         register_uc_functions=register_uc_functions,
+        num_workers=num_workers,
     )
 
     # Count successes
@@ -248,7 +251,7 @@ Examples:
         "--max-conversations",
         type=int,
         default=None,
-        help="Maximum number of conversations to process (default: all).",
+        help="Process the N most recent conversations (default: all).",
     )
     parser.add_argument(
         "--include-all-users",
@@ -296,10 +299,10 @@ Examples:
         help="Register UC functions with Genie room (default: enabled).",
     )
     parser.add_argument(
-        "--optimize-sql",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Optimize SQL queries using sqlglot before creating assets (default: disabled).",
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Number of concurrent worker threads for processing (default: 4).",
     )
     parser.add_argument(
         "--verbose",
@@ -365,7 +368,7 @@ Examples:
             register_uc_functions=args.register_functions,
             from_timestamp=from_ts,
             to_timestamp=to_ts,
-            optimize_sql=args.optimize_sql,
+            num_workers=args.num_workers,
         )
 
         # Return non-zero if there were errors

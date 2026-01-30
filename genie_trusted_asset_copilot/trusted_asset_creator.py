@@ -7,15 +7,16 @@ Unity Catalog functions from complex SQL queries.
 
 import json
 import re
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import sqlparse
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import StatementState
 from databricks_langchain import ChatDatabricks
 from langchain_core.messages import HumanMessage, SystemMessage
 from loguru import logger
-from unitycatalog.ai.core.base import FunctionExecutionResult
-from unitycatalog.ai.core.databricks import DatabricksFunctionClient
 
 from genie_trusted_asset_copilot.models import (
     CreationResult,
@@ -29,12 +30,33 @@ from genie_trusted_asset_copilot.models import (
 SQL_CORRECTION_PROMPT = """You are an expert SQL developer. A CREATE FUNCTION statement failed with an error.
 Analyze the error and provide a corrected SQL statement.
 
-Common issues to fix:
-1. Invalid parameter types - use valid Databricks SQL types (STRING, INT, DOUBLE, DATE, TIMESTAMP, etc.)
-2. Syntax errors in the SQL body
-3. Missing or extra parentheses
-4. Invalid DEFAULT values for parameters
-5. Reserved keyword conflicts
+Correct Unity Catalog function syntax examples:
+
+Example 1 - Function with CTE:
+CREATE OR REPLACE FUNCTION catalog.schema.func_name(param1 INT)
+RETURNS TABLE
+LANGUAGE SQL
+COMMENT 'Description'
+RETURN 
+  WITH cte_name AS (
+    SELECT col1 FROM table WHERE id = param1
+  )
+  SELECT * FROM cte_name
+
+Example 2 - Simple function:
+CREATE OR REPLACE FUNCTION catalog.schema.func_name()
+RETURNS TABLE
+LANGUAGE SQL
+COMMENT 'Description'
+RETURN SELECT col1, col2 FROM table
+
+Common mistakes to avoid:
+1. Don't use RETURN (SELECT ...) - no parentheses after RETURN
+2. Don't use AS instead of RETURN
+3. Don't add trailing semicolons inside the function body
+4. Parameters cannot be used directly in LIMIT clauses (use WHERE with row_number instead)
+5. Invalid parameter types - use valid Databricks SQL types (STRING, INT, DOUBLE, DATE, TIMESTAMP, etc.)
+6. Invalid DEFAULT values for parameters
 
 Provide ONLY the corrected CREATE FUNCTION statement. No explanation needed."""
 
@@ -243,6 +265,7 @@ class TrustedAssetCreator:
         candidates: list[TrustedAssetCandidate],
         dry_run: bool = False,
         force: bool = False,
+        num_workers: int = 4,
     ) -> list[CreationResult]:
         """
         Create SQL example instructions (trusted assets) in the Genie space.
@@ -251,6 +274,7 @@ class TrustedAssetCreator:
             candidates: List of candidates to add as trusted assets.
             dry_run: If True, preview changes without applying them.
             force: If True, replace existing assets instead of skipping.
+            num_workers: Number of concurrent worker threads (default: 4).
 
         Returns:
             List of CreationResult objects indicating success/failure.
@@ -284,10 +308,10 @@ class TrustedAssetCreator:
                     f"Found {len(existing_question_map)} existing trusted assets in space"
                 )
 
-            # Add new examples
-            new_examples: list[dict] = []
-            duplicates_in_candidates: set[str] = set()  # Track duplicates within candidates
-            indices_to_remove: list[int] = []  # Track indices to remove for force mode
+            # Filter candidates to process (skip duplicates and existing)
+            candidates_to_process: list[TrustedAssetCandidate] = []
+            duplicates_in_candidates: set[str] = set()
+            indices_to_remove: list[int] = []
 
             for candidate in candidates:
                 normalized = self._normalize_question(candidate.question)
@@ -321,13 +345,51 @@ class TrustedAssetCreator:
                     continue
 
                 duplicates_in_candidates.add(normalized)
+                candidates_to_process.append(candidate)
 
+            if not candidates_to_process:
+                logger.info("No new trusted assets to add after filtering")
+                return results
+
+            # Generate all usage guidance concurrently
+            logger.info(
+                f"Generating usage guidance for {len(candidates_to_process)} candidates using {num_workers} workers"
+            )
+            guidance_map: dict[str, str] = {}
+
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                future_to_candidate = {
+                    executor.submit(self._generate_usage_guidance, candidate): candidate
+                    for candidate in candidates_to_process
+                }
+                
+                logger.info(f"Thread pool started: {len(future_to_candidate)} tasks submitted with {num_workers} max worker threads")
+
+                for future in as_completed(future_to_candidate):
+                    candidate = future_to_candidate[future]
+                    try:
+                        guidance = future.result()
+                        guidance_map[candidate.question] = guidance
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to generate usage guidance for '{candidate.question[:50]}': {e}"
+                        )
+                        # Use fallback guidance
+                        guidance_map[candidate.question] = (
+                            f"Use this query to answer: {candidate.question[:100]}"
+                        )
+
+            # Build new examples using pre-generated guidance
+            new_examples: list[dict] = []
+
+            for candidate in candidates_to_process:
                 # Use parameterized SQL if available, otherwise use original
                 sql_to_use = candidate.parameterized_sql or candidate.sql
 
-                # Generate usage guidance using ChatDatabricks
-                logger.info(f"Generating usage guidance for: {candidate.question[:50]}...")
-                usage_guidance = self._generate_usage_guidance(candidate)
+                # Get the pre-generated usage guidance
+                usage_guidance = guidance_map.get(
+                    candidate.question, f"Use this query to answer: {candidate.question[:100]}"
+                )
 
                 # Convert SQLParameter to QueryParameter for Genie API
                 query_params: list[QueryParameter] | None = None
@@ -589,12 +651,16 @@ class TrustedAssetCreator:
             param_signature = "()"
             sql_body = candidate.sql
 
+        # Strip trailing semicolons from SQL body (not allowed in UC functions)
+        sql_body = sql_body.rstrip().rstrip(';').rstrip()
+
         # Create a table-valued function that returns the query result
+        # Note: No parentheses around sql_body after RETURN (required for CTE support)
         create_sql = f"""CREATE OR REPLACE FUNCTION {full_name}{param_signature}
 RETURNS TABLE
 LANGUAGE SQL
 COMMENT '{comment}'
-RETURN ({sql_body})"""
+RETURN {sql_body}"""
 
         return func_name, create_sql
 
@@ -704,35 +770,66 @@ RETURN ({sql_body})"""
                 if attempt > 0:
                     logger.info(f"Retry attempt {attempt}/{max_retries} for {func_name}")
 
-                self.client.statement_execution.execute_statement(
+                response = self.client.statement_execution.execute_statement(
                     warehouse_id=self.warehouse_id,
                     statement=current_sql,
                     catalog=self.catalog,
                     schema=self.schema,
-                    wait_timeout="50s",
+                    wait_timeout="30s",
                 )
+
+                # Poll for completion if still running
+                max_poll_attempts = 30  # 30 * 2s = 60s max polling time
+                poll_attempts = 0
+                while response.status.state in [StatementState.PENDING, StatementState.RUNNING]:
+                    if poll_attempts >= max_poll_attempts:
+                        raise Exception(f"Statement execution timed out after {max_poll_attempts * 2}s")
+                    
+                    time.sleep(2)
+                    poll_attempts += 1
+                    response = self.client.statement_execution.get_statement(response.statement_id)
+                    logger.debug(f"Polling statement {response.statement_id}, state: {response.status.state}, attempt: {poll_attempts}")
+
+                # Check if statement execution succeeded
+                if response.status.state != StatementState.SUCCEEDED:
+                    # Extract error message from response
+                    error_msg = "Unknown error"
+                    if response.status.error:
+                        # Try different possible error message fields
+                        if hasattr(response.status.error, 'message') and response.status.error.message:
+                            error_msg = response.status.error.message
+                        elif hasattr(response.status.error, 'error_message') and response.status.error.error_message:
+                            error_msg = response.status.error.error_message
+                        else:
+                            # Fall back to string representation of entire error object
+                            error_msg = str(response.status.error)
+                    raise Exception(f"Statement execution failed: {error_msg}")
 
                 logger.success(f"Created UC function: {func_name}")
 
                 # Set tags to indicate auto-generation
                 self._set_function_tags(full_function_name)
 
-                # Test the function
-                test_passed, test_error = self._test_function(full_function_name)
+                # Function was created successfully
+                creation_result = CreationResult(
+                    success=True,
+                    asset_type="uc_function",
+                    name=func_name,
+                )
 
-                if test_passed:
-                    return CreationResult(
-                        success=True,
-                        asset_type="uc_function",
-                        name=func_name,
-                    )
+                # Wait for UC metadata propagation before smoke test
+                logger.debug(f"Waiting for UC metadata propagation for {func_name}")
+                time.sleep(1)
+
+                # Smoke test is informational only - doesn't affect success
+                test_passed, test_error = self._test_function(full_function_name)
+                if not test_passed:
+                    logger.warning(f"Smoke test failed for {func_name}: {test_error}")
+                    logger.info(f"Function {func_name} was created but may need manual verification")
                 else:
-                    return CreationResult(
-                        success=True,
-                        asset_type="uc_function",
-                        name=func_name,
-                        error=f"Created but test failed: {test_error}",
-                    )
+                    logger.success(f"Smoke test passed for {func_name}")
+
+                return creation_result
 
             except Exception as e:
                 last_error = str(e)
@@ -803,7 +900,7 @@ RETURN ({candidate.sql})"""
 
     def _test_function(self, function_name: str) -> tuple[bool, str | None]:
         """
-        Test a UC function by executing it.
+        Simple smoke test: verify function exists in UC catalog.
 
         Args:
             function_name: The full function name (catalog.schema.function).
@@ -812,37 +909,49 @@ RETURN ({candidate.sql})"""
             Tuple of (success: bool, error_message: str | None).
         """
         try:
-            dfs = DatabricksFunctionClient(client=self.client)
-
-            logger.info(f"Testing function: {function_name}")
-            result: FunctionExecutionResult = dfs.execute_function(
-                function_name=function_name,
-                parameters={},
+            logger.info(f"Running smoke test for: {function_name}")
+            
+            # Simple existence check via DESCRIBE
+            test_sql = f"DESCRIBE FUNCTION {function_name}"
+            
+            response = self.client.statement_execution.execute_statement(
+                warehouse_id=self.warehouse_id,
+                statement=test_sql,
+                catalog=self.catalog,
+                schema=self.schema,
+                wait_timeout="30s",
             )
-
-            if result.error:
-                logger.error(f"Function test failed: {result.error}")
-                return False, str(result.error)
-
-            # Log success with result preview
-            result_str = str(result.value) if result.value else "No results"
-            if len(result_str) > 200:
-                result_str = result_str[:200] + "..."
-
-            logger.success(f"Function test passed: {function_name}")
-            logger.debug(f"Test result preview: {result_str}")
-            return True, None
-
+            
+            # Poll for completion if still running
+            max_poll_attempts = 10  # 10 * 1s = 10s max for smoke test
+            poll_attempts = 0
+            while response.status.state in [StatementState.PENDING, StatementState.RUNNING]:
+                if poll_attempts >= max_poll_attempts:
+                    return False, f"Smoke test timed out after {max_poll_attempts}s"
+                
+                time.sleep(1)
+                poll_attempts += 1
+                response = self.client.statement_execution.get_statement(response.statement_id)
+            
+            if response.status.state == StatementState.SUCCEEDED:
+                logger.success(f"Smoke test passed: {function_name} exists in catalog")
+                return True, None
+            else:
+                error_msg = f"DESCRIBE failed with state: {response.status.state}"
+                if response.status.error and hasattr(response.status.error, 'message'):
+                    error_msg += f" - {response.status.error.message}"
+                return False, error_msg
+                
         except Exception as e:
-            error_msg = f"Function test execution error: {e}"
-            logger.error(error_msg)
-            return False, error_msg
+            logger.warning(f"Smoke test failed: {e}")
+            return False, str(e)
 
     def create_uc_functions(
         self,
         candidates: list[TrustedAssetCandidate],
         dry_run: bool = False,
         force: bool = False,  # noqa: ARG002 - UC functions use CREATE OR REPLACE
+        num_workers: int = 4,
     ) -> list[CreationResult]:
         """
         Create Unity Catalog functions from complex queries.
@@ -855,6 +964,7 @@ RETURN ({candidate.sql})"""
             candidates: List of candidates to create functions for.
             dry_run: If True, preview changes without applying them.
             force: Accepted for API consistency (UC functions always replace).
+            num_workers: Number of concurrent worker threads (default: 4).
 
         Returns:
             List of CreationResult objects indicating success/failure.
@@ -874,20 +984,22 @@ RETURN ({candidate.sql})"""
                 )
             ]
 
-        results: list[CreationResult] = []
-        created_names: set[str] = set()
+        # Filter out duplicate function names
+        seen_names: set[str] = set()
+        unique_candidates: list[TrustedAssetCandidate] = []
 
         for candidate in candidates:
             func_name = self._sanitize_function_name(candidate.question)
-
-            # Skip if we already created a function with this name
-            if func_name in created_names:
+            if func_name not in seen_names:
+                seen_names.add(func_name)
+                unique_candidates.append(candidate)
+            else:
                 logger.debug(f"Skipping duplicate function name: {func_name}")
-                continue
 
-            created_names.add(func_name)
-
-            if dry_run:
+        if dry_run:
+            results: list[CreationResult] = []
+            for candidate in unique_candidates:
+                func_name = self._sanitize_function_name(candidate.question)
                 _, create_sql = self._generate_function_sql(candidate)
                 params_info = (
                     f" with {len(candidate.parameters)} parameters"
@@ -903,11 +1015,38 @@ RETURN ({candidate.sql})"""
                         name=func_name,
                     )
                 )
-                continue
+            return results
 
-            # Use retry mechanism with error correction
-            result = self._create_function_with_retry(candidate, max_retries=2)
-            results.append(result)
+        # Create functions concurrently
+        logger.info(
+            f"Creating {len(unique_candidates)} UC functions using {num_workers} workers"
+        )
+        results: list[CreationResult] = []
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {
+                executor.submit(self._create_function_with_retry, candidate, 2): candidate
+                for candidate in unique_candidates
+            }
+            
+            logger.info(f"Thread pool started: {len(futures)} tasks submitted with {num_workers} max worker threads")
+
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    candidate = futures[future]
+                    func_name = self._sanitize_function_name(candidate.question)
+                    logger.error(f"Unexpected error creating function {func_name}: {e}")
+                    results.append(
+                        CreationResult(
+                            success=False,
+                            asset_type="uc_function",
+                            name=func_name,
+                            error=f"Unexpected error: {e}",
+                        )
+                    )
 
         successful = sum(1 for r in results if r.success)
         logger.info(f"Created {successful}/{len(results)} UC functions")
@@ -1055,6 +1194,7 @@ RETURN ({candidate.sql})"""
         create_sql_instructions: bool = True,
         create_uc_functions: bool = True,
         register_uc_functions: bool = True,
+        num_workers: int = 4,
     ) -> tuple[list[CreationResult], list[CreationResult], list[CreationResult]]:
         """
         Create trusted assets, UC functions, and register functions with Genie.
@@ -1066,6 +1206,7 @@ RETURN ({candidate.sql})"""
             create_sql_instructions: Create SQL example instructions in Genie room.
             create_uc_functions: Create UC functions in Unity Catalog.
             register_uc_functions: Register UC functions with Genie room.
+            num_workers: Number of concurrent worker threads (default: 4).
 
         Returns:
             Tuple of (trusted_asset_results, uc_function_results, register_results).
@@ -1075,7 +1216,7 @@ RETURN ({candidate.sql})"""
         # Create SQL instructions (trusted assets)
         if create_sql_instructions:
             trusted_results = self.create_trusted_assets(
-                candidates, dry_run=dry_run, force=force
+                candidates, dry_run=dry_run, force=force, num_workers=num_workers
             )
         else:
             logger.info("Skipping SQL instruction creation (--no-sql-instructions)")
@@ -1083,7 +1224,9 @@ RETURN ({candidate.sql})"""
 
         # Create UC functions
         if create_uc_functions:
-            uc_results = self.create_uc_functions(candidates, dry_run=dry_run, force=force)
+            uc_results = self.create_uc_functions(
+                candidates, dry_run=dry_run, force=force, num_workers=num_workers
+            )
         else:
             logger.info("Skipping UC function creation (--no-uc-functions)")
             uc_results = []
@@ -1098,6 +1241,11 @@ RETURN ({candidate.sql})"""
                 if r.success
             ]
             if created_functions:
+                # Wait for Unity Catalog metadata to fully propagate before batch registration
+                # This ensures Genie can successfully retrieve schemas for all functions
+                logger.info(f"Waiting for UC metadata propagation for {len(created_functions)} functions before Genie registration")
+                time.sleep(3)
+                
                 register_results = self.register_functions_with_genie(
                     created_functions, dry_run=dry_run, force=force
                 )

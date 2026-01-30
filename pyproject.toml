@@ -10,7 +10,6 @@ dependencies = [
     "langchain-core>=0.3.0",
     "loguru>=0.7.3",
     "pydantic>=2.0",
-    "sqlglot>=27.0.0",
     "sqlparse>=0.5.5",
     "unitycatalog-ai>=0.1.0",
 ]
