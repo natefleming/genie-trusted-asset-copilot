@@ -169,6 +169,27 @@ genie-trusted-asset-copilot \
   --force
 ```
 
+### Optimize SQL Queries
+
+Before creating trusted assets, you can automatically optimize SQL queries to improve performance:
+
+```bash
+genie-trusted-asset-copilot \
+  --space-id YOUR_SPACE_ID \
+  --catalog YOUR_CATALOG \
+  --schema YOUR_SCHEMA \
+  --warehouse-id YOUR_WAREHOUSE_ID \
+  --optimize-sql
+```
+
+The optimizer will:
+- Simplify complex expressions
+- Remove redundant subqueries and CTEs
+- Eliminate unnecessary joins
+- Normalize query structure
+
+This is particularly useful for queries extracted from conversations, which may contain inefficiencies.
+
 ### Choose What to Create
 
 You can control exactly what the tool creates:
@@ -275,6 +296,7 @@ Make sure:
 | `--threshold` | Complexity level: `simple`, `moderate`, or `complex` | `complex` |
 | `--dry-run` | Preview without making changes | Off |
 | `--force` | Replace existing assets | Off |
+| `--optimize-sql` / `--no-optimize-sql` | Optimize SQL before creating assets | Off |
 | `--sql-instructions` / `--no-sql-instructions` | Create SQL examples | On |
 | `--uc-functions` / `--no-uc-functions` | Create functions | On |
 | `--register-functions` / `--no-register-functions` | Register functions with Genie | On |
