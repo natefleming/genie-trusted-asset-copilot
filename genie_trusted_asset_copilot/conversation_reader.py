@@ -5,6 +5,9 @@ This module fetches conversations and messages from a Genie space,
 extracting generated SQL queries from message attachments.
 """
 
+import re
+from datetime import datetime, timedelta, timezone
+
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.dashboards import (
     GenieConversation,
@@ -22,6 +25,85 @@ SUCCESSFUL_STATUSES = {
 }
 
 
+def parse_timestamp(timestamp_str: str) -> int:
+    """
+    Parse timestamp string into Unix milliseconds.
+
+    Supports multiple formats:
+    - Relative: 7d (days), 24h (hours), 30m (minutes), 1w (weeks)
+    - ISO 8601: 2026-01-15T10:30:00 or 2026-01-15T10:30:00Z
+    - Date: 2026-01-15 (assumes start of day in UTC)
+
+    Args:
+        timestamp_str: The timestamp string to parse.
+
+    Returns:
+        Unix timestamp in milliseconds.
+
+    Raises:
+        ValueError: If the timestamp format is not recognized.
+    """
+    timestamp_str = timestamp_str.strip()
+
+    # Try relative format first (e.g., 7d, 24h, 30m, 1w)
+    relative_pattern = r"^(\d+)([dhwm])$"
+    match = re.match(relative_pattern, timestamp_str, re.IGNORECASE)
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2).lower()
+
+        now = datetime.now(timezone.utc)
+        if unit == "m":
+            delta = timedelta(minutes=value)
+        elif unit == "h":
+            delta = timedelta(hours=value)
+        elif unit == "d":
+            delta = timedelta(days=value)
+        elif unit == "w":
+            delta = timedelta(weeks=value)
+        else:
+            raise ValueError(f"Unknown time unit: {unit}")
+
+        target_time = now - delta
+        return int(target_time.timestamp() * 1000)
+
+    # Try ISO 8601 format with timezone
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ]:
+        try:
+            # Handle Z suffix explicitly
+            ts_str = timestamp_str.replace("Z", "+00:00") if "Z" in timestamp_str else timestamp_str
+            dt = datetime.strptime(ts_str, fmt)
+            # If no timezone info, assume UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+
+    # Try simple date format (assumes start of day UTC)
+    try:
+        dt = datetime.strptime(timestamp_str, "%Y-%m-%d")
+        dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+
+    raise ValueError(
+        f"Unable to parse timestamp: {timestamp_str}\n"
+        f"Supported formats:\n"
+        f"  - Relative: 7d, 24h, 30m, 1w\n"
+        f"  - ISO 8601: 2026-01-15T10:30:00, 2026-01-15T10:30:00Z\n"
+        f"  - Date: 2026-01-15"
+    )
+
+
 class ConversationReader:
     """Reads conversations and extracts SQL queries from a Genie space."""
 
@@ -30,6 +112,8 @@ class ConversationReader:
         space_id: str,
         client: WorkspaceClient | None = None,
         include_all_users: bool = False,
+        from_timestamp: int | None = None,
+        to_timestamp: int | None = None,
     ) -> None:
         """
         Initialize the conversation reader.
@@ -39,10 +123,16 @@ class ConversationReader:
             client: Optional WorkspaceClient instance. If not provided, one will be created.
             include_all_users: If True, include conversations from all users
                 (requires CAN MANAGE permission).
+            from_timestamp: Optional start timestamp in milliseconds (inclusive). 
+                Conversations created before this are excluded.
+            to_timestamp: Optional end timestamp in milliseconds (inclusive). 
+                Conversations created after this are excluded.
         """
         self.space_id = space_id
         self.client = client or WorkspaceClient()
         self.include_all_users = include_all_users
+        self.from_timestamp = from_timestamp
+        self.to_timestamp = to_timestamp
 
     def list_conversations(
         self,
@@ -59,8 +149,17 @@ class ConversationReader:
         """
         conversations: list[GenieConversation] = []
         page_token: str | None = None
+        filtered_count = 0
 
         logger.info(f"Fetching conversations from Genie space: {self.space_id}")
+        if self.from_timestamp:
+            logger.info(
+                f"Filtering from: {datetime.fromtimestamp(self.from_timestamp / 1000, tz=timezone.utc).isoformat()}"
+            )
+        if self.to_timestamp:
+            logger.info(
+                f"Filtering to: {datetime.fromtimestamp(self.to_timestamp / 1000, tz=timezone.utc).isoformat()}"
+            )
 
         while True:
             response = self.client.genie.list_conversations(
@@ -76,6 +175,15 @@ class ConversationReader:
             for conv in response.conversations:
                 if max_conversations and len(conversations) >= max_conversations:
                     break
+                
+                # Filter by timestamp range if specified
+                if self.from_timestamp is not None and conv.created_timestamp < self.from_timestamp:
+                    filtered_count += 1
+                    continue
+                if self.to_timestamp is not None and conv.created_timestamp > self.to_timestamp:
+                    filtered_count += 1
+                    continue
+                
                 # Create a GenieConversation-like object from the summary
                 conversations.append(conv)
 
@@ -87,6 +195,8 @@ class ConversationReader:
             else:
                 break
 
+        if filtered_count > 0:
+            logger.info(f"Filtered out {filtered_count} conversations outside timestamp range")
         logger.info(f"Found {len(conversations)} conversations")
         return conversations
 

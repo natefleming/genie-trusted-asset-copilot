@@ -43,6 +43,90 @@ sys.path.insert(0, "..")
 
 # COMMAND ----------
 
+# Import timestamp parsing utilities
+import re
+from datetime import datetime, timedelta, timezone
+
+def parse_timestamp(timestamp_str: str) -> int:
+    """
+    Parse timestamp string into Unix milliseconds.
+
+    Supports multiple formats:
+    - Relative: 7d (days), 24h (hours), 30m (minutes), 1w (weeks)
+    - ISO 8601: 2026-01-15T10:30:00 or 2026-01-15T10:30:00Z
+    - Date: 2026-01-15 (assumes start of day in UTC)
+
+    Args:
+        timestamp_str: The timestamp string to parse.
+
+    Returns:
+        Unix timestamp in milliseconds.
+
+    Raises:
+        ValueError: If the timestamp format is not recognized.
+    """
+    timestamp_str = timestamp_str.strip()
+
+    # Try relative format first (e.g., 7d, 24h, 30m, 1w)
+    relative_pattern = r"^(\d+)([dhwm])$"
+    match = re.match(relative_pattern, timestamp_str, re.IGNORECASE)
+    if match:
+        value = int(match.group(1))
+        unit = match.group(2).lower()
+
+        now = datetime.now(timezone.utc)
+        if unit == "m":
+            delta = timedelta(minutes=value)
+        elif unit == "h":
+            delta = timedelta(hours=value)
+        elif unit == "d":
+            delta = timedelta(days=value)
+        elif unit == "w":
+            delta = timedelta(weeks=value)
+        else:
+            raise ValueError(f"Unknown time unit: {unit}")
+
+        target_time = now - delta
+        return int(target_time.timestamp() * 1000)
+
+    # Try ISO 8601 format with timezone
+    for fmt in [
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f%z",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S.%f",
+    ]:
+        try:
+            # Handle Z suffix explicitly
+            ts_str = timestamp_str.replace("Z", "+00:00") if "Z" in timestamp_str else timestamp_str
+            dt = datetime.strptime(ts_str, fmt)
+            # If no timezone info, assume UTC
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return int(dt.timestamp() * 1000)
+        except ValueError:
+            continue
+
+    # Try simple date format (assumes start of day UTC)
+    try:
+        dt = datetime.strptime(timestamp_str, "%Y-%m-%d")
+        dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp() * 1000)
+    except ValueError:
+        pass
+
+    raise ValueError(
+        f"Unable to parse timestamp: {timestamp_str}\n"
+        f"Supported formats:\n"
+        f"  - Relative: 7d, 24h, 30m, 1w\n"
+        f"  - ISO 8601: 2026-01-15T10:30:00, 2026-01-15T10:30:00Z\n"
+        f"  - Date: 2026-01-15"
+    )
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC ## Step 2: Configure Parameters
 # MAGIC
@@ -62,6 +146,9 @@ dbutils.widgets.dropdown("force_replace", "No", ["Yes", "No"], "8. Force Replace
 dbutils.widgets.dropdown("create_sql_instructions", "Yes", ["Yes", "No"], "9. Create SQL Instructions?")
 dbutils.widgets.dropdown("create_uc_functions", "Yes", ["Yes", "No"], "10. Create UC Functions?")
 dbutils.widgets.dropdown("register_functions", "Yes", ["Yes", "No"], "11. Register Functions with Genie?")
+dbutils.widgets.text("from_timestamp", "", "12. From Timestamp (e.g., 7d, 2026-01-15, empty = no filter)")
+dbutils.widgets.text("to_timestamp", "", "13. To Timestamp (e.g., 2026-01-31, empty = no filter)")
+dbutils.widgets.dropdown("optimize_sql", "No", ["Yes", "No"], "14. Optimize SQL with sqlglot?")
 
 # COMMAND ----------
 
@@ -86,9 +173,24 @@ force_replace = dbutils.widgets.get("force_replace") == "Yes"
 create_sql_instructions = dbutils.widgets.get("create_sql_instructions") == "Yes"
 create_uc_functions = dbutils.widgets.get("create_uc_functions") == "Yes"
 register_functions = dbutils.widgets.get("register_functions") == "Yes"
+from_timestamp_str = dbutils.widgets.get("from_timestamp").strip()
+to_timestamp_str = dbutils.widgets.get("to_timestamp").strip()
+optimize_sql = dbutils.widgets.get("optimize_sql") == "Yes"
 
 # Convert max_conversations to int if provided
 max_conversations = int(max_conversations_str) if max_conversations_str else None
+
+# Parse timestamp filters if provided
+from_ts = None
+to_ts = None
+
+if from_timestamp_str:
+    from_ts = parse_timestamp(from_timestamp_str)
+    print(f"Parsed from_timestamp: {datetime.fromtimestamp(from_ts / 1000, tz=timezone.utc).isoformat()}")
+
+if to_timestamp_str:
+    to_ts = parse_timestamp(to_timestamp_str)
+    print(f"Parsed to_timestamp: {datetime.fromtimestamp(to_ts / 1000, tz=timezone.utc).isoformat()}")
 
 # Validate required parameters
 if not space_id:
@@ -102,16 +204,19 @@ if not schema:
 print("=" * 60)
 print("Configuration")
 print("=" * 60)
-print(f"Genie Space ID:        {space_id}")
-print(f"Target Location:       {catalog}.{schema}")
-print(f"SQL Warehouse ID:      {warehouse_id or '(not provided)'}")
-print(f"Max Conversations:     {max_conversations or 'All'}")
-print(f"Complexity Threshold:  {complexity_threshold}")
-print(f"Dry Run:               {dry_run}")
-print(f"Force Replace:         {force_replace}")
+print(f"Genie Space ID:          {space_id}")
+print(f"Target Location:         {catalog}.{schema}")
+print(f"SQL Warehouse ID:        {warehouse_id or '(not provided)'}")
+print(f"Max Conversations:       {max_conversations or 'All'}")
+print(f"Complexity Threshold:    {complexity_threshold}")
+print(f"Dry Run:                 {dry_run}")
+print(f"Force Replace:           {force_replace}")
 print(f"Create SQL Instructions: {create_sql_instructions}")
-print(f"Create UC Functions:   {create_uc_functions}")
-print(f"Register Functions:    {register_functions}")
+print(f"Create UC Functions:     {create_uc_functions}")
+print(f"Register Functions:      {register_functions}")
+print(f"From Timestamp:          {from_timestamp_str or 'None (no filter)'}")
+print(f"To Timestamp:            {to_timestamp_str or 'None (no filter)'}")
+print(f"Optimize SQL:            {optimize_sql}")
 print("=" * 60)
 
 # COMMAND ----------
@@ -138,6 +243,9 @@ report = run(
     create_sql_instructions=create_sql_instructions,
     create_uc_functions=create_uc_functions,
     register_uc_functions=register_functions,
+    from_timestamp=from_ts,
+    to_timestamp=to_ts,
+    optimize_sql=optimize_sql,
 )
 
 # COMMAND ----------

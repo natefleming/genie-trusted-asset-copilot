@@ -17,6 +17,7 @@ from genie_trusted_asset_copilot.models import (
     SQLParameter,
     TrustedAssetCandidate,
 )
+from genie_trusted_asset_copilot.sql_optimizer import SQLOptimizer
 
 COMPLEXITY_SYSTEM_PROMPT = """You are an expert SQL analyst. Your task is to analyze SQL queries and determine their complexity.
 
@@ -85,6 +86,7 @@ class ComplexityEvaluator:
         model: str = "databricks-claude-sonnet-4",
         temperature: float = 0.0,
         max_tokens: int = 1000,
+        optimize_sql: bool = False,
     ) -> None:
         """
         Initialize the complexity evaluator.
@@ -93,14 +95,17 @@ class ComplexityEvaluator:
             model: The Databricks model to use for analysis.
             temperature: LLM temperature (0 for deterministic output).
             max_tokens: Maximum tokens in the response.
+            optimize_sql: Whether to optimize SQL before analysis (default: False).
         """
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.optimize_sql = optimize_sql
 
         self._llm: ChatDatabricks | None = None
         self._structured_llm: ChatDatabricks | None = None
         self._param_extraction_llm: ChatDatabricks | None = None
+        self._sql_optimizer: SQLOptimizer | None = None
 
     @property
     def llm(self) -> ChatDatabricks:
@@ -128,6 +133,13 @@ class ComplexityEvaluator:
                 ParameterExtraction
             )
         return self._param_extraction_llm
+
+    @property
+    def sql_optimizer(self) -> SQLOptimizer:
+        """Lazy initialization of SQL optimizer."""
+        if self._sql_optimizer is None:
+            self._sql_optimizer = SQLOptimizer(dialect="databricks")
+        return self._sql_optimizer
 
     def extract_parameters(
         self,
@@ -341,22 +353,36 @@ class ComplexityEvaluator:
         for i, query in enumerate(queries):
             logger.info(f"Analyzing query {i + 1}/{len(queries)}: {query.question[:60]}...")
 
-            analysis = self.analyze_query(query.sql)
+            # Optimize SQL before analysis if enabled
+            sql_to_analyze = query.sql
+            if self.optimize_sql:
+                optimized_sql, was_optimized, optimizations = self.sql_optimizer.optimize(
+                    query.sql
+                )
+                if was_optimized:
+                    logger.info(f"SQL optimized: {', '.join(optimizations)}")
+                    logger.debug(
+                        f"Original length: {len(query.sql)}, "
+                        f"Optimized length: {len(optimized_sql)}"
+                    )
+                    sql_to_analyze = optimized_sql
+
+            analysis = self.analyze_query(sql_to_analyze)
 
             # Log the SQL, complexity, and reasoning for every query
             self._log_analysis_result(query, analysis)
 
             if complexity_order[analysis.complexity] >= threshold_value:
-                # Extract parameters for complex queries
+                # Extract parameters for complex queries (from optimized SQL)
                 logger.info("Extracting parameters for complex query...")
                 parameters, parameterized_sql = self.extract_parameters(
-                    query.sql, query.question
+                    sql_to_analyze, query.question
                 )
 
                 candidates.append(
                     TrustedAssetCandidate(
                         question=query.question,
-                        sql=query.sql,
+                        sql=sql_to_analyze,  # Store optimized SQL
                         complexity=analysis,
                         execution_time_ms=query.execution_time_ms,
                         message_id=query.message_id,
